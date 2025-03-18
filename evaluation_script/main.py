@@ -3,25 +3,17 @@ import glob
 import json
 import math
 import os
-
 import numpy as np
 import numba
 from scipy.spatial.transform import Rotation as R
-import open3d as o3d
-
-##################################
-# Evaluation Script for A9 3D Object Detection
-##################################
-#
-# Example usage:
-# python evaluation.py --camera_id <CAMERA_ID> --folder_path_ground_truth /path/to/ground_truth --folder_path_predictions /path/to/predictions --object_min_points 5 [--use_superclasses] --prediction_type lidar3d_supervised --prediction_format openlabel --use_ouster_lidar_only
-
 import sys
 from pathlib import Path
 
-from src.utils.perspective import parse_perspective
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+##################################
+# Evaluation Script for 3D Object Detection
+##################################
+
 
 iou_threshold_dict = {
     "CAR": 0.1,
@@ -35,8 +27,6 @@ iou_threshold_dict = {
     "EMERGENCY_VEHICLE": 0.1,
     "OTHER": 0.1,
 }
-
-superclass_iou_threshold_dict = {"VEHICLE": 0.1, "PEDESTRIAN": 0.1, "BICYCLE": 0.1}  # 0.7  # 0.3  # 0.5
 
 
 def rotate_iou_gpu_eval(boxes, query_boxes, criterion=-1, device_id=0):
@@ -172,61 +162,24 @@ def get_evaluation_results(
     gt_annotation_frames,
     pred_annotation_frames,
     classes,
-    use_superclass=True,
     iou_thresholds=None,
     num_pr_points=50,
     difficulty_mode="Overall&Distance",
     ap_with_heading=True,
     num_parts=100,
-    print_ok=False,
-    prediction_type=None,
+    print_results=False
 ):
     if iou_thresholds is None:
-        if use_superclass:
-            iou_thresholds = superclass_iou_threshold_dict
-        else:
-            iou_thresholds = iou_threshold_dict
+        iou_thresholds = iou_threshold_dict
 
     assert len(gt_annotation_frames) == len(pred_annotation_frames), "the number of GT must match predictions"
     assert difficulty_mode in ["EASY", "MODERATE", "HARD", "OVERALL"], "difficulty mode is not supported"
 
-    if use_superclass:
-        if (
-            ("CAR" in classes)
-            or ("BUS" in classes)
-            or ("TRUCK" in classes)
-            or ("TRAILER" in classes)
-            or ("VAN" in classes)
-            or ("OTHER" in classes)
-        ):
-            assert (
-                ("CAR" in classes) and ("BUS" in classes) and ("TRUCK" in classes)
-            ), "CAR/BUS/TRUCK must all exist for vehicle detection"
-
-        # check if labels are present for each class
-        num_vehicles = 0
-        num_pedestrians = 0
-        num_bicycles = 0
-        for gt_anno_frame in gt_annotation_frames:
-            for object_class in gt_anno_frame["name"]:
-                if object_class.upper() in ["CAR", "TRUCK", "BUS", "TRAILER", "VAN", "EMERGENCY_VEHICLE", "OTHER"]:
-                    num_vehicles += 1
-                if object_class.upper() == "PEDESTRIAN":
-                    num_pedestrians += 1
-                if object_class.upper() in ["BICYCLE", "MOTORCYCLE"]:
-                    num_bicycles += 1
-
-        classes = []
-        if num_vehicles > 0:
-            classes.append("VEHICLE")
-        if num_pedestrians > 0:
-            classes.append("PEDESTRIAN")
-        if num_bicycles > 0:
-            classes.append("BICYCLE")
-
     num_samples = len(gt_annotation_frames)
     split_parts = compute_split_parts(num_samples, num_parts)
-    ious = compute_iou3d_cpu(gt_annotation_frames, pred_annotation_frames, prediction_type=prediction_type)
+    # Use GPU for IoU 3D calculation
+    #ious = compute_iou3d(gt_annotation_frames, pred_annotation_frames)
+    ious = compute_iou3d_cpu(gt_annotation_frames, pred_annotation_frames)
     num_classes = len(classes)
     num_difficulties = 4
     difficulty_types = ["overall_0_inf", "0-40m", "40-50m", "50m-64"]
@@ -250,36 +203,12 @@ def get_evaluation_results(
             print("no gt or prediction")
             continue
 
-        if use_superclass:
-            if gt_anno["name"].size > 0:
-                n_pedestrians = (gt_anno["name"] == "PEDESTRIAN").sum()
-                n_bicylces = (np.logical_or(gt_anno["name"] == "BICYCLE", gt_anno["name"] == "MOTORCYCLE")).sum()
-                n_vehicles = len(gt_anno["name"]) - n_pedestrians - n_bicylces
 
-                for obj_class in classes:
-                    if obj_class.upper() == "VEHICLE":
-                        gt_class_occurrence[obj_class] += n_vehicles
-                    if obj_class.upper() == "BICYCLE":
-                        gt_class_occurrence[obj_class] += n_bicylces
-                    if obj_class.upper() == "PEDESTRIAN":
-                        gt_class_occurrence[obj_class] += n_pedestrians
+        for cur_class in classes:
+            if gt_anno["name"].size > 0:
+                gt_class_occurrence[cur_class] += (gt_anno["name"] == cur_class.upper()).sum()
             if pred_anno["name"].size > 0:
-                n_pedestrians = (pred_anno["name"] == "PEDESTRIAN").sum()
-                n_bicylces = (np.logical_or(pred_anno["name"] == "BICYCLE", pred_anno["name"] == "MOTORCYCLE")).sum()
-                n_vehicles = len(pred_anno["name"]) - n_pedestrians - n_bicylces
-                for obj_class in classes:
-                    if obj_class.upper() == "VEHICLE":
-                        pred_class_occurrence[obj_class] += n_vehicles
-                    if obj_class.upper() == "BICYCLE":
-                        pred_class_occurrence[obj_class] += n_bicylces
-                    if obj_class.upper() == "PEDESTRIAN":
-                        pred_class_occurrence[obj_class] += n_pedestrians
-        else:
-            for cur_class in classes:
-                if gt_anno["name"].size > 0:
-                    gt_class_occurrence[cur_class] += (gt_anno["name"] == cur_class.upper()).sum()
-                if pred_anno["name"].size > 0:
-                    pred_class_occurrence[cur_class] += (pred_anno["name"] == cur_class.upper()).sum()
+                pred_class_occurrence[cur_class] += (pred_anno["name"] == cur_class.upper()).sum()
 
     for cls_idx, cur_class in enumerate(classes):
         iou_threshold = iou_thresholds[cur_class.upper()]
@@ -307,8 +236,7 @@ def get_evaluation_results(
                         pred_anno,
                         difficulty_mode,
                         difficulty_level=diff_idx,
-                        class_name=cur_class.upper(),
-                        use_superclass=use_superclass,
+                        class_name=cur_class.upper()
                     )
                     gt_flags.append(gt_flag)
                     pred_flags.append(pred_flag)
@@ -402,6 +330,7 @@ def get_evaluation_results(
     ret_dict["precision"] = precision_values/len(classes)
     ret_dict["recall"] = recall_values/len(classes)
 
+
     ret_str = "|AP@%-15s|" % (str(num_pr_points))
     for diff_type in difficulty_types:
         ret_str += "%-15s|" % diff_type
@@ -410,6 +339,7 @@ def get_evaluation_results(
     ret_str += "%-10s|" % "Pos-RMSE"
     ret_str += "%-10s|" % "Rot-RMSE"
     ret_str += "\n"
+
     for cls_idx, cur_class in enumerate(classes):
         ret_str += "|%-18s|" % cur_class
         for diff_idx in range(num_difficulties):
@@ -428,6 +358,7 @@ def get_evaluation_results(
         ret_str += "%-10.2f|" % np.average(rot_err[cls_idx].flatten())
         ret_str += "\n"
     mAP = np.mean(AP, axis=0)
+    
     ret_str += "|%-18s|" % "mAP"
     for diff_idx in range(num_difficulties):
         diff_type = difficulty_types[diff_idx]
@@ -435,6 +366,7 @@ def get_evaluation_results(
         ap_score = mAP[diff_idx]
         ret_dict[key] = ap_score
         ret_str += "%-15.2f|" % ap_score
+    ret_dict["3d_map"] = mAP[0] # 3D mAP for distance [0 - inf]
     ret_str += "%-20s|" % (
         str(np.sum(list(pred_class_occurrence.values())))
         + "/"
@@ -446,7 +378,7 @@ def get_evaluation_results(
     ret_str += "%-10.2f|" % np.average(rot_err.flatten())
     ret_str += "\n"
 
-    if print_ok:
+    if print_results:
         print(ret_str)
 
     ####################
@@ -474,8 +406,12 @@ def get_evaluation_results(
     ret_header_str += f"{np.average(pos_err.flatten()):.2f},"
     ret_header_str += f"{np.average(rot_err.flatten()):.2f}\n"
 
+    ret_dict["3d_iou"] = np.average(iou_3d.flatten())
+    ret_dict["position_rmse"] = np.average(pos_err.flatten())
+    ret_dict["rotation_rmse"] = np.average(rot_err.flatten())
+
     # print pretty table results for excel sheet
-    # print(ret_header_str)
+    print(ret_header_str)
     ####################
     return ret_str, ret_dict
 
@@ -606,7 +542,7 @@ def compute_statistics(iou, pred_scores, gt_flag, pred_flag, score_threshold, io
     return tp, fp, fn
 
 
-def filter_data(gt_anno, pred_anno, difficulty_mode, difficulty_level, class_name, use_superclass):
+def filter_data(gt_anno, pred_anno, difficulty_mode, difficulty_level, class_name):
     """
     Filter data by class name and difficulty
 
@@ -626,34 +562,12 @@ def filter_data(gt_anno, pred_anno, difficulty_mode, difficulty_level, class_nam
     num_gt = len(gt_anno["name"])
     gt_flag = np.zeros(num_gt, dtype=np.int64)
     if num_gt > 0:
-        if use_superclass:
-            if class_name == "VEHICLE":
-                reject = np.logical_or(
-                    gt_anno["name"] == "PEDESTRIAN",
-                    np.logical_or(gt_anno["name"] == "BICYCLE", gt_anno["name"] == "MOTORCYCLE"),
-                )
-            elif class_name == "BICYCLE":
-                reject = ~np.logical_or(gt_anno["name"] == "BICYCLE", gt_anno["name"] == "MOTORCYCLE")
-            else:
-                reject = gt_anno["name"] != class_name
-        else:
-            reject = gt_anno["name"] != class_name
+        reject = gt_anno["name"] != class_name
         gt_flag[reject] = -1
     num_pred = len(pred_anno["name"])
     pred_flag = np.zeros(num_pred, dtype=np.int64)
     if num_pred > 0:
-        if use_superclass:
-            if class_name == "VEHICLE":
-                reject = np.logical_or(
-                    pred_anno["name"] == "PEDESTRIAN",
-                    np.logical_or(pred_anno["name"] == "BICYCLE", pred_anno["name"] == "MOTORCYCLE"),
-                )
-            elif class_name == "BICYCLE":
-                reject = ~np.logical_or(pred_anno["name"] == "BICYCLE", pred_anno["name"] == "MOTORCYCLE")
-            else:
-                reject = pred_anno["name"] != class_name
-        else:
-            reject = pred_anno["name"] != class_name
+        reject = pred_anno["name"] != class_name
         pred_flag[reject] = -1
 
     if difficulty_mode == "OVERALL":
@@ -773,7 +687,7 @@ def compute_iou3d(gt_annos, pred_annos, split_parts, with_heading):
     return ious
 
 
-def compute_iou3d_cpu(gt_annos, pred_annos, prediction_type=None):
+def compute_iou3d_cpu(gt_annos, pred_annos):
     ious = []
     gt_num = len(gt_annos)
     for i in range(gt_num):
@@ -792,302 +706,64 @@ def get_attribute_by_name(attribute_list, attribute_name):
     return None
 
 
-def load_lidar_boxes_into_s110(input_folder_path, object_min_points=0, ouster_lidar_only=False, prediction_type=None):
-    def append_object(num_points, l, w, h, rotation, position_3d, category, prediction_type):
-        # Ground truth is labeled with camera data, so there are objects
-        # contained in the ground truth without a single corresponding
-        # point in the LiDAR point cloud.
-        # You can specify how many minimum points there should be before a label
-        # is included.
-        if num_points >= object_min_points:
-            name.append(category.upper())
-            boxes_3d.append(np.hstack((position_3d, l, w, h, rotation)))
-            num_points_in_gt.append(num_points)
-
-    labels_file_paths = listdir_fullpath(input_folder_path)
+def load_3d_boxes(input_file_path):
     labels_list = []
-
-    for label_file_path in labels_file_paths:
-        if ouster_lidar_only and "ouster" not in label_file_path:
-            continue
-        name = []
-        boxes_3d = []
-        num_points_in_gt = []
-        json_data = json.load(open(label_file_path))
-        scores = []
-        if "openlabel" in json_data:
-            for frame_id, frame_obj in json_data["openlabel"]["frames"].items():
-                if len(frame_obj["objects"].items()) == 0:
-                    print("no detections in frame: {}".format(label_file_path))
+    name = []
+    boxes_3d = []
+    num_points_in_gt = []
+    json_data = json.load(open(input_file_path))
+    scores = []
+    if "openlabel" in json_data:
+        for frame_id, frame_obj in json_data["openlabel"]["frames"].items():
+            if len(frame_obj["objects"].items()) == 0:
+                print("no detections in frame: {}".format(input_file_path))
+                continue
+            for object_id, label in frame_obj["objects"].items():
+                # Dataset in ASAM OpenLABEL format
+                category = label["object_data"]["type"]
+                l = float(label["object_data"]["cuboid"]["val"][7])
+                w = float(label["object_data"]["cuboid"]["val"][8])
+                h = float(label["object_data"]["cuboid"]["val"][9])
+                quat_x = float(label["object_data"]["cuboid"]["val"][3])
+                quat_y = float(label["object_data"]["cuboid"]["val"][4])
+                quat_z = float(label["object_data"]["cuboid"]["val"][5])
+                quat_w = float(label["object_data"]["cuboid"]["val"][6])
+                if np.linalg.norm([quat_x, quat_y, quat_z, quat_w]) == 0.0:
                     continue
-                for object_id, label in frame_obj["objects"].items():
-                    # Dataset in ASAM OpenLABEL format
-                    l = float(label["object_data"]["cuboid"]["val"][7])
-                    w = float(label["object_data"]["cuboid"]["val"][8])
-                    h = float(label["object_data"]["cuboid"]["val"][9])
-                    quat_x = float(label["object_data"]["cuboid"]["val"][3])
-                    quat_y = float(label["object_data"]["cuboid"]["val"][4])
-                    quat_z = float(label["object_data"]["cuboid"]["val"][5])
-                    quat_w = float(label["object_data"]["cuboid"]["val"][6])
-                    if np.linalg.norm([quat_x, quat_y, quat_z, quat_w]) == 0.0:
-                        continue
-                    rotation = R.from_quat([quat_x, quat_y, quat_z, quat_w]).apply([l / 2.0, 0, 0])
-                    position_3d = [
-                        float(label["object_data"]["cuboid"]["val"][0]),
-                        float(label["object_data"]["cuboid"]["val"][1]),
-                        float(label["object_data"]["cuboid"]["val"][2]),  # - h / 2  # To avoid floating bounding boxes
-                    ]
-                    image_pos = perspective.project_from_lidar_south_to_image(
-                        np.array(
-                            [
-                                [position_3d[0], position_3d[0] + rotation[0]],
-                                [position_3d[1], position_3d[1] + rotation[1]],
-                                [position_3d[2] - h / 2, position_3d[2] - h / 2 + rotation[2]],
-                            ]
-                        )
-                    )
 
-                    # 3d position in s110_base with z=0
-                    position_3d_in_s110_base = perspective.project_to_ground(image_pos)
-                    orientation_vec = position_3d_in_s110_base[:, 0] - position_3d_in_s110_base[:, 1]
-                    # yaw rotation in s110_base frame
-                    rotation_yaw = np.arctan2(orientation_vec[1], orientation_vec[0])
-
-                    attribute = get_attribute_by_name(label["object_data"]["cuboid"]["attributes"]["num"], "num_points")
-
-                    num_points = 0
-                    if attribute is not None:
-                        num_points = int(float(attribute["val"]))
-                    append_object(
-                        num_points,
-                        l,
-                        w,
-                        h,
-                        rotation_yaw,
-                        position_3d_in_s110_base[:, 0],
-                        label["object_data"]["type"],
-                        prediction_type=prediction_type,
-                    )
-
-                    attribute = get_attribute_by_name(label["object_data"]["cuboid"]["attributes"]["num"], "score")
-                    if attribute is not None:
-                        score = attribute["val"]
-                        scores.append(score)
-        else:
-            for label in json_data["labels"]:
-                if "dimensions" in label:
-                    # Dataset R1 NOT IN ASAM OpenLABEL format
-                    l = float(label["dimensions"]["length"])
-                    w = float(label["dimensions"]["width"])
-                    h = float(label["dimensions"]["height"])
-                    quat_x = float(label["rotation"]["_x"])
-                    quat_y = float(label["rotation"]["_y"])
-                    quat_z = float(label["rotation"]["_z"])
-                    quat_w = float(label["rotation"]["_w"])
-                    rotation = R.from_quat([quat_x, quat_y, quat_z, quat_w]).as_euler("zyx", degrees=False)[0]
-                    position_3d = [
-                        float(label["center"]["x"]),
-                        float(label["center"]["y"]),
-                        float(label["center"]["z"]) - h / 2,  # To avoid floating bounding boxes
-                    ]
-                else:
-                    # Dataset R0 NOT IN ASAM OpenLABEL format
-                    l = float(label["box3d"]["dimension"]["length"])
-                    w = float(label["box3d"]["dimension"]["width"])
-                    h = float(label["box3d"]["dimension"]["height"])
-                    rotation = float(label["box3d"]["orientation"]["rotationYaw"])
-                    position_3d = [
-                        float(label["box3d"]["location"]["x"]),
-                        float(label["box3d"]["location"]["y"]),
-                        float(label["box3d"]["location"]["z"]),
-                    ]
-                num_points = 0
-                append_object(num_points, l, w, h, rotation, position_3d, label["category"])
-
-        label_dict = {
-            "name": np.array(name),
-            "boxes_3d": np.array(boxes_3d),
-            "num_points_in_gt": np.array(num_points_in_gt),
-            "score": np.array(scores),
-        }
-        labels_list.append(label_dict)
-    return labels_list
-
-
-def parse_input_files(input_folder_path, object_min_points=0, ouster_lidar_only=False, prediction_type=None):
-    def append_object(num_points, l, w, h, rotation, position_3d, category, prediction_type):
-        # Ground truth is labeled with camera data, so there are objects
-        # contained in the ground truth without a single corresponding
-        # point in the LiDAR point cloud.
-        # You can specify how many minimum points there should be before a label
-        # is included.
-        name.append(category.upper())
-        boxes_3d.append(np.hstack((position_3d, l, w, h, rotation)))
-        num_points_in_gt.append(num_points)
-
-    labels_file_list = listdir_fullpath(input_folder_path)
-    labels_file_list.sort()
-    labels_list = []
-
-    for label_file in labels_file_list:
-        if ouster_lidar_only and "ouster" not in label_file:
-            continue
-        name = []
-        boxes_3d = []
-        num_points_in_gt = []
-        json_file = open(
-            label_file,
-        )
-        json_data = json.load(json_file)
-        scores = []
-        if "openlabel" in json_data:
-            for frame_id, frame_obj in json_data["openlabel"]["frames"].items():
-                for object_id, label in frame_obj["objects"].items():
-
-                    # Dataset in ASAM OpenLABEL format
-                    l = float(label["object_data"]["cuboid"]["val"][7])
-                    w = float(label["object_data"]["cuboid"]["val"][8])
-                    h = float(label["object_data"]["cuboid"]["val"][9])
-                    quat_x = float(label["object_data"]["cuboid"]["val"][3])
-                    quat_y = float(label["object_data"]["cuboid"]["val"][4])
-                    quat_z = float(label["object_data"]["cuboid"]["val"][5])
-                    quat_w = float(label["object_data"]["cuboid"]["val"][6])
-                    if np.linalg.norm([quat_x, quat_y, quat_z, quat_w]) == 0.0:
-                        continue
-                    rotation = R.from_quat([quat_x, quat_y, quat_z, quat_w]).as_euler("zyx", degrees=False)[0]
-                    position_3d = [
-                        float(label["object_data"]["cuboid"]["val"][0]),
-                        float(label["object_data"]["cuboid"]["val"][1]),
-                        float(label["object_data"]["cuboid"]["val"][2]),  # - h / 2  # To avoid floating bounding boxes
-                    ]
-                    attribute = get_attribute_by_name(label["object_data"]["cuboid"]["attributes"]["num"], "num_points")
-
-                    num_points = 10  # Dummy value.
-                    if (prediction_type is None) or (attribute is not None and "lidar3d" in prediction_type):
-                        num_points = int(attribute["val"])
-
-                    append_object(
-                        num_points,
-                        l,
-                        w,
-                        h,
-                        rotation,
-                        position_3d,
-                        label["object_data"]["type"],
-                        prediction_type=prediction_type,
-                    )
-
-                    attribute = get_attribute_by_name(label["object_data"]["cuboid"]["attributes"]["num"], "score")
-                    if attribute is not None:
-                        score = attribute["val"]
-                        scores.append(score)
-        else:
-            for label in json_data["labels"]:
-                if "dimensions" in label:
-                    # Dataset R1 NOT IN ASAM OpenLABEL format
-                    l = float(label["dimensions"]["length"])
-                    w = float(label["dimensions"]["width"])
-                    h = float(label["dimensions"]["height"])
-                    quat_x = float(label["rotation"]["_x"])
-                    quat_y = float(label["rotation"]["_y"])
-                    quat_z = float(label["rotation"]["_z"])
-                    quat_w = float(label["rotation"]["_w"])
-                    rotation = R.from_quat([quat_x, quat_y, quat_z, quat_w]).as_euler("zyx", degrees=False)[0]
-                    position_3d = [
-                        float(label["center"]["x"]),
-                        float(label["center"]["y"]),
-                        float(label["center"]["z"]) - h / 2,  # To avoid floating bounding boxes
-                    ]
-                else:
-                    # Dataset R0 NOT IN ASAM OpenLABEL format
-                    l = float(label["box3d"]["dimension"]["length"])
-                    w = float(label["box3d"]["dimension"]["width"])
-                    h = float(label["box3d"]["dimension"]["height"])
-                    rotation = float(label["box3d"]["orientation"]["rotationYaw"])
-                    position_3d = [
-                        float(label["box3d"]["location"]["x"]),
-                        float(label["box3d"]["location"]["y"]),
-                        float(label["box3d"]["location"]["z"]),
-                    ]
-                num_points = 0
-                append_object(num_points, l, w, h, rotation, position_3d, label["category"])
-
-        json_file.close()
-        label_dict = {
-            "name": np.array(name),
-            "boxes_3d": np.array(boxes_3d),
-            "num_points_in_gt": np.array(num_points_in_gt),
-            "score": np.array(scores),
-        }
-        labels_list.append(label_dict)
-    return labels_list
-
-
-def get_pc_path(labels_path):
-    parent_dir = os.path.dirname(labels_path)
-    subdirs = os.listdir(parent_dir)
-    label_dir = os.path.basename(labels_path)
-    if subdirs[0] == label_dir:
-        return os.path.join(parent_dir, subdirs[1])
-    else:
-        return os.path.join(parent_dir, subdirs[0])
-
-
-def listdir_fullpath(d):
-    # add all file paths into list using glob
-    return sorted(glob.glob(os.path.join(d, "*.json")))
-
-
-def prepare_predictions_kitti(predictions_path):
-    if os.path.isfile(predictions_path):
-        predictions_file_list = [predictions_path]
-    else:
-        predictions_file_list = sorted(glob.glob(os.path.join(predictions_path, "*.txt")))
-        predictions_file_list.sort()
-    predictions_list = []
-
-    for prediction_file in predictions_file_list:
-        name = []
-        boxes_3d = []
-        with open(prediction_file, "r") as f:
-            for line in f:
-                line = line.rstrip().split()
-                prediction = [float(item) for item in line[1:]]
-
+                rotation_yaw = R.from_quat([quat_x, quat_y, quat_z, quat_w])
                 position_3d = [
-                    prediction[0],
-                    prediction[1],
-                    prediction[2],
+                    float(label["object_data"]["cuboid"]["val"][0]),
+                    float(label["object_data"]["cuboid"]["val"][1]),
+                    float(label["object_data"]["cuboid"]["val"][2]),  # - h / 2  # To avoid floating bounding boxes
                 ]
-                yaw_radian = prediction[6]
-                rotation = np.array([0, 0, yaw_radian])
-                h = prediction[5]
-                image_pos = perspective.project_from_lidar_south_to_image(
-                    np.array(
-                        [
-                            [position_3d[0], position_3d[0] + rotation[0]],
-                            [position_3d[1], position_3d[1] + rotation[1]],
-                            [position_3d[2] - h / 2, position_3d[2] - h / 2 + rotation[2]],
-                        ]
-                    )
-                )
 
-                # 3d position in s110_base with z=0
-                position_3d_in_s110_base = perspective.project_to_ground(image_pos)
-                orientation_vec = position_3d_in_s110_base[:, 0] - position_3d_in_s110_base[:, 1]
-                # yaw rotation in s110_base frame
-                rotation_yaw = np.arctan2(orientation_vec[1], orientation_vec[0])
-                prediction[0] = position_3d_in_s110_base[0, 0]
-                prediction[1] = position_3d_in_s110_base[1, 0]
-                prediction[2] = position_3d_in_s110_base[2, 0]
-                prediction[6] = rotation_yaw
+                attribute = get_attribute_by_name(label["object_data"]["cuboid"]["attributes"]["num"], "num_points")
+                num_points = 0
+                if attribute is not None:
+                    num_points = int(float(attribute["val"]))
+                
+                # Specify how many minimum points there should be before a label is included.
+                if num_points >= 5:
+                    name.append(category.upper())
+                    boxes_3d.append(np.hstack((position_3d, l, w, h, rotation_yaw)))
+                    num_points_in_gt.append(num_points)
 
-                prediction.insert(0, line[0])
-                name.append(str(prediction[0]).upper())
-                boxes_3d.append(prediction[1:])
-        prediction_dict = {"name": np.array(name), "boxes_3d": np.array(boxes_3d)}
-        predictions_list.append(prediction_dict)
-    return predictions_list
+                attribute = get_attribute_by_name(label["object_data"]["cuboid"]["attributes"]["num"], "score")
+                if attribute is not None:
+                    score = attribute["val"]
+                    scores.append(score)
+       
+        label_dict = {
+            "name": np.array(name),
+            "boxes_3d": np.array(boxes_3d),
+            "num_points_in_gt": np.array(num_points_in_gt),
+            "score": np.array(scores),
+        }
+        labels_list.append(label_dict)
+    return labels_list
+
+
 
 
 
@@ -1130,34 +806,7 @@ def evaluate(test_annotation_file, user_submission_file, phase_codename, **kwarg
         }
     """
 
-
-    args = parse_arguments()
-    camera_id = args.camera_id
-    assert camera_id is not None, "Please provide the camera ID you want to use for evaluation."
-
-    object_min_points = args.object_min_points
-    use_superclasses = args.use_superclasses
-    file_path_calibration_data = args.file_path_calibration_data
-    # possible values: [lidar3d_unsupervised, lidar3d_supervised, mono3d, multi3d]
-    prediction_type = args.prediction_type
-    prediction_format = args.prediction_format  # possible values: [openlabel, kitti]
-    use_ouster_lidar_only = args.use_ouster_lidar_only
-    perspective = parse_perspective(file_path_calibration_data)
-    if hasattr(perspective, "initialize_matrices"):
-        perspective.initialize_matrices()
-
-    gt_data = load_lidar_boxes_into_s110(
-        test_annotation_file,
-        object_min_points=object_min_points,
-        ouster_lidar_only=use_ouster_lidar_only,
-    )
-
-    pred_data = load_lidar_boxes_into_s110(
-        user_submission_file,
-        object_min_points=object_min_points,
-        ouster_lidar_only=use_ouster_lidar_only,
-    )
-
+    object_min_points = 5
     classes = [
         "CAR",
         "TRUCK",
@@ -1170,33 +819,34 @@ def evaluate(test_annotation_file, user_submission_file, phase_codename, **kwarg
         "EMERGENCY_VEHICLE",
         "OTHER",
     ]
+    gt_data = load_3d_boxes(test_annotation_file)
+    pred_data = load_3d_boxes(user_submission_file)
+
+
     result_str, result_dict = get_evaluation_results(
         gt_data,
         pred_data,
         classes,
-        use_superclass=use_superclasses,
         difficulty_mode="OVERALL",
-        prediction_type=prediction_type,
     )
     output = {}
 
-    if phase_codename == "test":
-        print("Evaluating for Test Phase")
-        # TODO: check keys
-        output["result"] = [
-            {
-                "test_split": {
-                    "Precision": result_dict["precision"],
-                    "Recall": result_dict["recall"],
-                    "3D_IoU": result_dict["3d_iou"],
-                    "Position_RMSE": result_dict["position_rmse"],
-                    "Rotation_RMSE": result_dict["rotation_rmse"],
-                    "3D_mAP": result_dict["3d_map"],
-                }
-            },
-        ]
-        # To display the results in the result file
-        output["submission_result"] = output["result"][0]
-        print("Completed evaluation for Test Phase")
-    # DEFAULT - END
+    
+    print("Evaluating for Test Phase")
+    # TODO: check keys
+    output["result"] = [
+        {
+            "test_split": {
+                "Precision": result_dict["precision"],
+                "Recall": result_dict["recall"],
+                "3D_IoU": result_dict["3d_iou"],
+                "Position_RMSE": result_dict["position_rmse"],
+                "Rotation_RMSE": result_dict["rotation_rmse"],
+                "3D_mAP": result_dict["3d_map"],
+            }
+        },
+    ]
+    # To display the results in the result file
+    output["submission_result"] = output["result"][0]
+    print("Completed evaluation for Test Phase")
     return output

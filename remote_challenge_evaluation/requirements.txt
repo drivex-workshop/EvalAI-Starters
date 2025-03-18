@@ -2,4 +2,3 @@ requests==2.25.1
 numpy
 numba
 scipy
-open3d
