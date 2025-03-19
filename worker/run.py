@@ -27,7 +27,6 @@ def run():
 
     EVALUATION_SCRIPTS = {}
     EVALUATION_SCRIPTS[challenge_id] = challenge_module
-    print("Trying to evaluate")
     submission_metadata = {
         "status": u"running",
         "when_made_public": None,
