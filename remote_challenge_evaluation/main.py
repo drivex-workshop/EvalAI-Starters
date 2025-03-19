@@ -11,8 +11,8 @@ from evaluate import evaluate
 # See https://evalai.readthedocs.io/en/latest/evaluation_scripts.html#writing-remote-evaluation-script
 auth_token = os.environ["AUTH_TOKEN"]
 evalai_api_server = os.environ["API_SERVER"]
-queue_name = os.environ["QUEUE_NAME"]
-challenge_pk = os.environ["CHALLENGE_PK"]
+queue_name = os.environ["QUEUE_NAME"] # get from admin
+challenge_pk = os.environ["CHALLENGE_PK"] # get from admin
 save_dir = os.environ.get("SAVE_DIR", "./")
 
 

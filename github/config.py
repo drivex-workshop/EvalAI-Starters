@@ -11,6 +11,7 @@ API_HOST_URL = "https://eval.ai"
 IGNORE_DIRS = [
     ".git",
     ".github",
+    ".idea",
     "github",
     "code_upload_challenge_evaluation",
     "remote_challenge_evaluation",

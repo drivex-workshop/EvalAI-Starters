@@ -39,7 +39,7 @@ install("numpy")
 install("numba")
 install("scipy")
 
-install_local_package("package_folder_name")
+#install_local_package("package_folder_name")
 
 
 
