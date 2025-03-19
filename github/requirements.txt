@@ -1,4 +1,5 @@
 PyGithub===1.53
+requests==2.24.0
 
 #numpy==1.23.5
 #scipy==1.9.3
@@ -11,7 +12,6 @@ PyGithub===1.53
 
 #pytorch3d==0.7.2
 
-#requests==2.24.0
 #beautifulsoup4
 #six
 #tqdm
