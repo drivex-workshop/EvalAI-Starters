@@ -33,6 +33,8 @@ def install_local_package(folder_name):
     ]
 )
 
+install("shapely==1.7.1")
+install("requests==2.25.1")
 install("numpy")
 install("numba")
 install("scipy")
